@@ -1,0 +1,153 @@
+name: Autograde ML Pipeline
+
+on: [push, workflow_dispatch]
+
+jobs:
+  grade:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      statuses: write
+      checks: write
+
+    steps:
+      - name: Checkout student submission
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout hidden tests
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: sst-cs/dst-assignment-4-tests
+          token: ${{ secrets.HIDDEN_TESTS_TOKEN }}
+          path: hidden-tests
+
+      - name: Verify hidden tests available
+        run: |
+          if [ ! -d hidden-tests/tests ]; then
+            echo "::error title=Hidden tests missing::Could not fetch the hidden tests."
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pytest nbformat nbconvert ipython
+          pip install -r requirements.txt
+
+      - name: Task 1 - Data Loading
+        id: data_loading
+        uses: classroom-resources/autograding-command-grader@v1
+        with:
+          test-name: 'Data Loading (1 pt)'
+          setup-command: ''
+          command: 'python -m pytest hidden-tests/tests/test_assignment.py::test_data_loading -q'
+          timeout: 10
+          max-score: 1
+
+      - name: Task 2/3 - Preprocessing & Split
+        id: preprocessing
+        uses: classroom-resources/autograding-command-grader@v1
+        with:
+          test-name: 'Preprocessing (2 pts)'
+          setup-command: ''
+          command: 'python -m pytest hidden-tests/tests/test_assignment.py::test_preprocessing -q'
+          timeout: 10
+          max-score: 2
+
+      - name: Task 4 - KNN Scratch (k=5)
+        id: knn5
+        uses: classroom-resources/autograding-command-grader@v1
+        with:
+          test-name: 'KNN Scratch k=5 (1 pt)'
+          setup-command: ''
+          command: 'python -m pytest hidden-tests/tests/test_assignment.py::test_knn_scratch_k5 -q'
+          timeout: 30
+          max-score: 1
+
+      - name: Task 4 - KNN Scratch (k=3)
+        id: knn3
+        uses: classroom-resources/autograding-command-grader@v1
+        with:
+          test-name: 'KNN Scratch k=3 (2 pts)'
+          setup-command: ''
+          command: 'python -m pytest hidden-tests/tests/test_assignment.py::test_knn_scratch_k3 -q'
+          timeout: 30
+          max-score: 2
+
+      - name: Task 5 - Sklearn Models
+        id: sklearn
+        uses: classroom-resources/autograding-command-grader@v1
+        with:
+          test-name: 'Sklearn Models (1 pt)'
+          setup-command: ''
+          command: 'python -m pytest hidden-tests/tests/test_assignment.py::test_sklearn_models -q'
+          timeout: 10
+          max-score: 1
+
+      - name: Task 6 - Evaluation
+        id: eval
+        uses: classroom-resources/autograding-command-grader@v1
+        with:
+          test-name: 'Evaluation (1 pt)'
+          setup-command: ''
+          command: 'python -m pytest hidden-tests/tests/test_assignment.py::test_evaluation -q'
+          timeout: 10
+          max-score: 1
+
+      - name: Task 7 - Comparison
+        id: comp
+        uses: classroom-resources/autograding-command-grader@v1
+        with:
+          test-name: 'Comparison & CV (2 pts)'
+          setup-command: ''
+          command: 'python -m pytest hidden-tests/tests/test_assignment.py::test_comparison -q'
+          timeout: 20
+          max-score: 2
+
+      - name: Package Results
+        id: package
+        run: |
+          D1=$(echo "${{steps.data_loading.outputs.result}}" | base64 -d 2>/dev/null | jq '.tests[0].score // .score // 0')
+          D2=$(echo "${{steps.preprocessing.outputs.result}}" | base64 -d 2>/dev/null | jq '.tests[0].score // .score // 0')
+          K5=$(echo "${{steps.knn5.outputs.result}}" | base64 -d 2>/dev/null | jq '.tests[0].score // .score // 0')
+          K3=$(echo "${{steps.knn3.outputs.result}}" | base64 -d 2>/dev/null | jq '.tests[0].score // .score // 0')
+          SK=$(echo "${{steps.sklearn.outputs.result}}" | base64 -d 2>/dev/null | jq '.tests[0].score // .score // 0')
+          EV=$(echo "${{steps.eval.outputs.result}}" | base64 -d 2>/dev/null | jq '.tests[0].score // .score // 0')
+          CM=$(echo "${{steps.comp.outputs.result}}" | base64 -d 2>/dev/null | jq '.tests[0].score // .score // 0')
+          
+          TOTAL=$(( ${D1:-0} + ${D2:-0} + ${K5:-0} + ${K3:-0} + ${SK:-0} + ${EV:-0} + ${CM:-0} ))
+          echo "Total Score: $TOTAL / 10"
+
+          DEADLINE_EPOCH=$(date -d "2026-07-05T18:59:00Z" +%s)
+          ZERO_EPOCH=$(date -d "2026-07-12T18:59:00Z" +%s)
+          LAST_CODE_ISO=$(git log --format="%cI" -- . ':(exclude).github/' 2>/dev/null | head -1)
+          [ -z "$LAST_CODE_ISO" ] && LAST_CODE_ISO=$(git log -1 --format=%cI)
+          LAST_CODE_EPOCH=$(date -d "$LAST_CODE_ISO" +%s 2>/dev/null || echo 0)
+          
+          if [ "$LAST_CODE_EPOCH" -gt "$ZERO_EPOCH" ]; then
+            TOTAL=0
+          elif [ "$LAST_CODE_EPOCH" -gt "$DEADLINE_EPOCH" ]; then
+            TOTAL=$(( TOTAL * 6 / 10 ))
+          fi
+
+          for i in $(seq 1 10); do
+            STATUS="fail"; SCORE_VAL=0
+            if [ $i -le $TOTAL ]; then STATUS="pass"; SCORE_VAL=1; fi
+            JSON="{\"version\":1,\"status\":\"$STATUS\",\"max_score\":1,\"tests\":[{\"name\":\"Requirement $i\",\"status\":\"$STATUS\",\"score\":$SCORE_VAL,\"max_score\":1}]}"
+            B64=$(echo -n "$JSON" | base64 -w 0)
+            echo "R${i}_RESULTS=$B64" >> $GITHUB_ENV
+          done
+
+      - name: Autograding Reporter
+        uses: classroom-resources/autograding-grading-reporter@v1
+        continue-on-error: true
+        with:
+          runners: r1,r2,r3,r4,r5,r6,r7,r8,r9,r10
